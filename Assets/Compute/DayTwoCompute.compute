@@ -1,0 +1,247 @@
+﻿#pragma kernel CSGetCompareMasks
+#pragma kernel CSClearCompareMasks
+#pragma kernel CSGetBackwardsNumbers
+#pragma kernel CSGetForwardsNumbers
+#pragma kernel CSTestMinMaxAgainstCompareMask
+#pragma kernel CSAggregateCompareMaskResults
+#pragma use_dxc
+#pragma require Int64BufferAtomics // needed for InterlockedAdd with 64-bit numbers
+#pragma require Native16Bit
+
+#include "Lib.hlsl"
+
+// don't love using uint64_t here, but we're above the uint limit for large numbers here
+// there is probably a smarter way to handle this but i cba rn
+RWStructuredBuffer<uint64_t> _CompareMasks;
+RWStructuredBuffer<uint> _CompareMaskResult;
+RWStructuredBuffer<int64_t> _Result;
+RWStructuredBuffer<uint64_t> _MinNumbers;
+RWStructuredBuffer<uint64_t> _MaxNumbers;
+uint _CompareMasksArraySize;
+uint _CompareMasksWidth;
+
+uint GetFactorCount(uint length)
+{
+    // hack - this depends on (1 << -1) resolving as 0
+    // halve via bitshift, resolves to 9, 4, 2, 1, 1 (amount of "valid" digit lengths for palindromes)
+    // it might be possible to refit this on numbers greater than 5 digits, but right now it would break horribly. so hopefully that's not a thing.
+    return clamp(9 / (1 << length), 1, 9);
+}
+
+// pow(10, x) or even round(pow(10, x)) does not work for 7
+// this is because there's no way to do integer powers, only floats
+// so this is a drop-in method for int pow
+uint PowerOfTen(uint count)
+{
+    uint value = 1;
+    
+    // this is immensely stupid and probably not the best way to do this
+    // branching would probably be cheaper
+    // however, you do have to admit it has swag
+    value *= ((count & 1) * 9) + 1;
+    value *= ((count & 2) * 99/2.0) + 1;
+    value *= ((count & 4) * 9999/4.0) + 1;
+    value *= ((count & 8) * 99999999/8.0) + 1;
+    
+    return value;
+    //return round(pow(10, count));
+}
+
+uint64_t PowerOfTenLong(uint count)
+{
+    uint64_t value = 1;
+    
+    // this is immensely stupid and probably not the best way to do this
+    // branching would probably be cheaper
+    // however, you do have to admit it has swag
+    value *= ((count & 1) * 9) + 1;
+    value *= ((count & 2) * 99/2.0) + 1;
+    value *= ((count & 4) * 9999/4.0) + 1;
+    value *= ((count & 8) * 99999999/8.0) + 1;
+    
+    return value;
+    //return round(pow(10, count));
+}
+
+// get the array index for this number
+// it's important that this is always unique per-number, ideally it also iterates in a logical way
+uint GetArrayStartIndex(uint index, uint length, uint factorCount)
+{
+    // first, add the start indexes of previous "tens groups"    
+    uint startIndex = 0;
+    for (uint i = 0; i < length; i++)
+    {
+         startIndex += (9 * PowerOfTen(i) * GetFactorCount(i)); // what
+    }
+    
+    // finally, add the previous numbers from this "tens group"
+    uint previousNumberCount = (index - PowerOfTen(length)) * factorCount;
+    startIndex += previousNumberCount;
+    
+    return startIndex;
+}
+
+[numthreads(32,1,1)]
+void CSGetCompareMasks (uint3 id : SV_DispatchThreadID)
+{
+    uint index = id.x;
+    if (index == 0 || index > 99999)
+        return;
+    
+    uint length = floor(log10(index)); // how many digits long is this number
+
+    // weed out duplicate numbers (eg. 33/333 can just be skipped entirely, and should resolve to 0 in-shader)
+    if (length == 1 && (index % 11) == 0)
+        return;
+    if (length == 2 && (index % 111) == 0)
+        return;
+    if (length == 3 && (index % 101) == 0)  // TIL every 4-digit number with duplicated 2 number sequences is divisible by 101.. which I guess makes sense when you think about it
+        return;
+    if (length == 4 && (index % 11111) == 0)
+        return;
+    uint factorCount = GetFactorCount(length);
+    uint startIndex = GetArrayStartIndex(index, length, factorCount);
+    
+    // ideally I should parallelize this a bit more to avoid slowest threads being (n*9) but eh
+    // if factorCount is 1, just duplicate (either 8 or 10)
+    // if factorCount is 2, we need a 6 digit and 9 digit (only 3)
+    // if factorCount is 4, we need 4,6,8,10 (only 2)
+    uint64_t duplicatedDigits = index; 
+    // for (int i = 0; i < factorCount); i++)
+    for (int i = 0; i < factorCount; i++)
+    {
+        duplicatedDigits += index * PowerOfTenLong((length + 1) * (i + 1)); // add a new number shifted N digits over
+        _CompareMasks[startIndex + i] = duplicatedDigits;
+    }
+}
+
+// prob a slight performance loss by making this another pass but its just gonna make things so much easier
+[numthreads(32,1,1)]
+void CSClearCompareMasks (uint3 id : SV_DispatchThreadID)
+{
+    uint index = id.x;
+    if (index > _CompareMasksArraySize)
+        return;
+    
+    _CompareMasks[index] = 0;
+    _CompareMaskResult[index] = 0;
+    _MinNumbers[index] = 0;
+    _MaxNumbers[index] = 0;
+    _Result[0] = 0;
+}
+
+// string parsing, both backwards and forwards
+[numthreads(32,1,1)]
+void CSGetBackwardsNumbers (uint3 id : SV_DispatchThreadID)
+{
+    uint byteIndex = id.x;
+    uint totalBytes = _InputLength * 4;
+    
+    if (byteIndex >= totalBytes)
+        return;
+    
+    uint byte = GetByte(byteIndex);
+    
+    // only check when looking at a -
+    if (byte != 4294967293)
+    {
+        _MinNumbers[byteIndex] = 0;
+        return;
+    }
+    
+    // assumes number is 10 digits or smaller
+    uint64_t currentNumber = 0;
+    uint64_t power = 1;
+    for (int i = 1; i < 11; i++)
+    {
+        uint nextByte = GetByte(byteIndex - i);
+        if (nextByte < 10)
+        {
+            currentNumber += nextByte * power;
+            power *= 10;
+        }
+        else
+        {
+            break;
+        }
+    }
+
+    _MinNumbers[byteIndex] = currentNumber;
+}
+
+[numthreads(32,1,1)]
+void CSGetForwardsNumbers (uint3 id : SV_DispatchThreadID)
+{
+    uint byteIndex = id.x;
+    uint totalBytes = _InputLength * 4;
+    
+    if (byteIndex >= totalBytes)
+        return;
+    
+    uint byte = GetByte(byteIndex);
+    
+    // only check when looking at a -
+    if (byte != 4294967293)
+    {
+        _MaxNumbers[byteIndex] = 0;
+        return;
+    }
+    
+    // assumes number is 10 digits or smaller
+    uint64_t currentNumber = 0;
+    for (int i = 1; i < 11; i++)
+    {
+        uint nextByte = GetByte(byteIndex + i);
+        if (nextByte < 10)
+        {
+            currentNumber *= 10;
+            currentNumber += nextByte;
+        }
+        else
+        {
+            break;
+        }
+    }
+
+    _MaxNumbers[byteIndex] = currentNumber;
+}
+
+
+[numthreads(32,1,1)]
+void CSTestMinMaxAgainstCompareMask (uint3 id : SV_DispatchThreadID)
+{
+    uint index = id.x;
+    if (index > _CompareMasksArraySize)
+        return;
+
+    uint64_t mask = _CompareMasks[index];
+    if (mask == 0)
+        return;
+    
+    // loop through all MaxNumbers - most will be zero
+    for (int i = 0; i < _InputLength; i++)
+    {
+        uint64_t numberMin = _MinNumbers[i];
+        uint64_t numberMax = _MaxNumbers[i];
+        if (numberMin <= mask && numberMax >= mask)
+        {
+            InterlockedAdd(_CompareMaskResult[index], 1);
+        }
+    }
+}
+
+[numthreads(32,1,1)]
+void CSAggregateCompareMaskResults (uint3 id : SV_DispatchThreadID)
+{
+    uint index = id.x;
+    if (index > _CompareMasksArraySize)
+        return;
+
+    uint result = _CompareMaskResult[index];
+    if (result == 0)
+        return;
+    
+    uint64_t value = _CompareMasks[index];
+    
+    InterlockedAdd(_Result[0], value * result);
+}

@@ -9,9 +9,17 @@ public class DayEditor : Editor
     {
         DrawDefaultInspector();
 
-        if (GUILayout.Button("Run Editor Action"))
+        if (GUILayout.Button("Run once"))
         {
-            ((DayBase)target).Run();
+            ((DayBase)target).Run(1);
+        }
+        if (GUILayout.Button("Run 10,000 times"))
+        {
+            ((DayBase)target).Run(10000);
+        }
+        if (GUILayout.Button("Run 1,000,000 times"))
+        {
+            ((DayBase)target).Run(1000000);
         }
     }
 }
@@ -20,4 +28,15 @@ public class DayEditor : Editor
 public class DayOneEditor : DayEditor
 {
 }
+
+[CustomEditor(typeof(DayOnePartTwo))]
+public class DayOnePartTwoEditor : DayEditor
+{
+}
+
+[CustomEditor(typeof(DayTwo))]
+public class DayTwoEditor : DayEditor
+{
+}
+
 #endif

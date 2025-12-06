@@ -1,6 +1,7 @@
 #pragma kernel CSGetDeltas
 #pragma kernel CSScan
 #pragma kernel CSAggregate
+#pragma kernel CSAggregatePartTwo
 
 StructuredBuffer<uint> _Input;
 uint _InputLength;
@@ -15,7 +16,7 @@ uint GetByte(uint byteIndex)
     // 0-9 = 0-9
     // L = 28
     // R = 34
-    // newline = 4294967258
+    // newline = 4294967261
 
     return byte;
 }
@@ -35,12 +36,12 @@ void CSGetDeltas (uint3 id : SV_DispatchThreadID)
     uint byte = GetByte(byteIndex);
 
     // if the selected byte is a newline, calculate all the deltas (looking backwards)
-    if (!(byte & 0x10000000))
+    if (byte != 4294967258)
         return;
 
     uint currentNumber = 0;
     uint power = 1;
-    for (int i = 1; i < 5; i++)
+    for (int i = 1; i < 6; i++)
     {
         uint nextByte = GetByte(byteIndex - i);
         if (nextByte == 28)
@@ -97,6 +98,26 @@ int GetFinalValue(uint index)
     return finalValue;
 }
 
+int GetZeroOverlapCount(uint index)
+{
+    int value = _Deltas[index];
+    int previousValue = _Deltas[index - 1];
+    
+    if (value == previousValue)
+        return 0;
+    
+    // hack to avoid negative boundary
+    int direction = (value < previousValue) ? -1 : 0;
+    
+    // get actual final value - dial should start at 50, and loops over
+    int hundredCount = floor(float(50 + value + direction) / 100.0);
+    int previousHundredCount = floor(float(50 + previousValue + direction) / 100.0);
+
+    int hundredThresholdPassCount = abs(hundredCount - previousHundredCount);
+    
+    return hundredThresholdPassCount;
+}
+
 [numthreads(32,1,1)]
 void CSAggregate (uint3 id : SV_DispatchThreadID)
 {
@@ -113,5 +134,22 @@ void CSAggregate (uint3 id : SV_DispatchThreadID)
     if (finalValue == 0 && finalValue != previousFinalValue)
     {
         InterlockedAdd(_Result[0], 1);
+    }
+}
+
+[numthreads(32,1,1)]
+void CSAggregatePartTwo (uint3 id : SV_DispatchThreadID)
+{
+    uint index = id.x;
+    uint totalBytes = _InputLength * 4;
+    
+    if (index >= totalBytes || index == 0)
+        return;
+
+    int finalValue = GetZeroOverlapCount(index);
+    
+    if (finalValue != 0)
+    {
+        InterlockedAdd(_Result[0], finalValue);
     }
 }

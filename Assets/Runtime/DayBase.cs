@@ -7,9 +7,6 @@ using Debug = UnityEngine.Debug;
 
 public abstract class DayBase : MonoBehaviour
 {
-    private const long RUN_COUNT = 1000000;
-
-
     [SerializeField]
     protected TextAsset inputFile;
 
@@ -23,16 +20,18 @@ public abstract class DayBase : MonoBehaviour
 
     private void Start()
     {
-        Run();
+        #if UNITY_EDITOR
+            Run(1);
+        #else
+            Run(1000000);
+        #endif
     }
     
-    public void Run()
+    public void Run(int count)
     {
         input = inputFile.text;
         inputBytes = inputFile.GetData<byte>();
         inputLength = inputBytes.Length;
-        Debug.Log(inputLength);
-        Debug.Log(inputBytes.Length);
         inputBuffer = new GraphicsBuffer(GraphicsBuffer.Target.Structured, inputLength / 4, 4);
         inputBuffer.SetData(inputBytes);
         
@@ -42,7 +41,7 @@ public abstract class DayBase : MonoBehaviour
         var stopwatch = new Stopwatch();
         stopwatch.Start();
 
-        for (int i = 0; i < RUN_COUNT; i++)
+        for (int i = 0; i < count; i++)
         {
             RunCode();
         }
@@ -52,15 +51,20 @@ public abstract class DayBase : MonoBehaviour
         // get data to ensure all is actually executing
         stopwatch.Stop();
 
-        if (RUN_COUNT == 1000)
+        if (count == 10000)
         {
-            UnityEngine.Debug.Log("Time elapsed (us): "+ (stopwatch.Elapsed.TotalMilliseconds));
-            text.text = "Time elapsed (us): " + (stopwatch.Elapsed.TotalMilliseconds);
+            UnityEngine.Debug.Log("Time elapsed (us): "+ (stopwatch.Elapsed.TotalMilliseconds / 10));
+            text.text = "Time elapsed (us): " + (stopwatch.Elapsed.TotalMilliseconds / 10);
         }
-        else
+        else if (count == 1000000)
         {
             UnityEngine.Debug.Log("Time elapsed (us): "+ (stopwatch.Elapsed.TotalMilliseconds / 1000));
             text.text = "Time elapsed (us): " + (stopwatch.Elapsed.TotalMilliseconds / 1000);
+        }
+        else if (count == 1)
+        {
+            UnityEngine.Debug.Log("Time elapsed (us): "+ (stopwatch.Elapsed.TotalMilliseconds * 1000));
+            text.text = "Time elapsed (us): " + (stopwatch.Elapsed.TotalMilliseconds * 1000);
         }
 
         inputBytes.Dispose();

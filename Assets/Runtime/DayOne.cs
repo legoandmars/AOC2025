@@ -83,7 +83,10 @@ public class DayOne : DayBase
 
     public override void Cleanup()
     {
-        // Debug.Log(length);
+        var bytes = new int[1];
+        resultBuffer.GetData(bytes);
+        Debug.Log("Result: "+bytes[0]);
+        
         resultBuffer.Release();
         deltasBuffer.Release();
         deltasBufferB.Release();
